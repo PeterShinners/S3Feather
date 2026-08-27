@@ -1,6 +1,6 @@
 # S3Feather
 
-An S3 browser that runs entirely in your browser. No server, no install, no build step — two files, open one of them and start browsing.  Works on your PC and mobile and platform independed.
+An S3 browser that runs entirely in your browser. No server, no install, no build step — one HTML file, open it and start browsing. Works on desktop and mobile, on any platform.
 
 Live: [try it now!](https://wespeakenglish.github.io/S3Feather/) 
 
@@ -19,23 +19,24 @@ Live: [try it now!](https://wespeakenglish.github.io/S3Feather/)
 - **List and grid views** — grid shows real image thumbnails
 - **Presigned share links** — temporary download URLs, 5 minutes to 7 days
 - **Drag and drop** — drop files anywhere on the window to upload into the current prefix
-- **Sort and filter** — by name, size or date; live filter across every page loaded for the prefix
+- **Flatten** — one keypress lists every key beneath the current prefix, nested folders included, so you can search a whole subtree instead of walking it
+- **Sort and filter** — by name, size or date; live filter across every page loaded for the prefix, and across every level when the listing is flattened
 - **Paged listings** — prefixes larger than S3's 1,000-entry page load on demand; sorting and filtering cover every page loaded, and drawing stays capped so a 25,000-object prefix does not freeze the tab
 - **Encrypted credential files** — save your connections to a passphrase-protected `.s3vault` file and load them on any machine
 - **Nothing stored in the browser** — credentials live in `sessionStorage` for the tab; `localStorage` is never touched
-- **No build step** — plain HTML, CSS and JavaScript; nothing to compile or install
+- **No build step** — one file of plain HTML, CSS and JavaScript; nothing to compile or install
 
 ---
 
 ## Quick start
 
-1. Put `index.html` and `styles.css` in the same folder and open `index.html` in any modern browser
+1. Open `index.html` in any modern browser
 2. Click **Add connection** in the sidebar
 3. Enter your access key, secret and bucket name, then click **Connect**
 
 Already have a `.s3vault` file from an earlier session? Click **Load from file** instead.
 
-> **Serve over HTTPS if you host it.** Opening the files straight off disk (`file://`) or from `localhost` is fine — browsers count both as secure contexts, so the encrypted save and load work there. On a plain-`http://` origin served to others, `crypto.subtle` may be withheld and those features switch off; everything else still works. The sidebar says which situation you are in, and only calls it a problem when the crypto is actually missing.
+> **Serve over HTTPS if you host it.** Opening the file straight off disk (`file://`) or from `localhost` is fine — browsers count both as secure contexts, so the encrypted save and load work there. On a plain-`http://` origin served to others, `crypto.subtle` may be withheld and those features switch off; everything else still works. The sidebar says which situation you are in, and only calls it a problem when the crypto is actually missing.
 
 ---
 
@@ -68,10 +69,24 @@ S3 has no folders. A "folder" is just a set of keys that share a prefix, and the
 | `[` / `]` | Previous / next page of drawn rows |
 | `G` | Toggle list / grid view |
 | `H` | Toggle hiding placeholder files |
+| `F` | Flatten — list every key below the current prefix, or go back to one level |
 | `Delete` | Delete the selection |
 | `Escape` | Stop a running upload or delete, then close a dialog, then close the sidebar drawer, then leave the address bar, then clear the filter, then clear the selection |
 
 Typing shortcuts are ignored while a text field has focus. Mouse selection also supports shift-click for a range and `⌘`/`Ctrl`-click to toggle one item.
+
+---
+
+## Flattening a prefix
+
+A normal listing asks S3 for one level: keys at the current prefix, and everything deeper rolled up into folder rows. That is the right default, but it means the filter box only ever searches where you are standing, and the size in the status bar counts only what is on screen.
+
+The tree button beside the eye — or `F`, or the command palette — drops the delimiter from the request, so S3 returns every key beneath the current prefix. Rows then carry the rest of the path in their name: `propustka_Novanta/scan.jpg` sits beside `data.zip`. Typing in the filter now searches the whole subtree, which is how you find a file when you cannot remember which folder it went into.
+
+- **The prefix does not move.** The address bar still says where you are, and **Upload** and **New folder** still act there. Flattening widens what the listing reaches; it is not navigation.
+- **The footer changes to match** — `6 objects · 3.8 MB · all levels below sync0/` — because a prefix count means nothing when there are no folder rows.
+- **Paging is unchanged.** Still 1,000 keys per request, so a large subtree arrives over several **load next 1,000** clicks; the row cap and `[` / `]` work as they always do.
+- **Switching clears the filter and re-lists**, since it changes what is asked of S3 rather than how the answer is drawn. It is per session and resets when you disconnect.
 
 ---
 
@@ -192,8 +207,9 @@ Enter the URL in the **Endpoint** field. Path-style requests and Signature V4 ar
 - **Select all covers the drawn rows**, not the whole prefix. Deleting a *folder* is different: that enumerates every page itself, so it does not miss anything.
 - **Deleting many objects shows progress and can be stopped.** A delete of more than one object, or of any folder, opens a progress dialog with two phases: walking the prefixes to find what is there — counting up, since no total is known yet, and nothing has been deleted at that point — and then the batched deletes, which fill a bar in steps of 1,000 and name the batch in flight (*Batch 3 of 9*). The dialog yields a frame between steps, so the progress is actually painted rather than collapsing into a single jump at the end on a fast connection. **Stop** takes effect at the next batch boundary; the dialog then reports how many were removed, because those are gone and cannot be brought back. A single object still deletes with just a toast.
 - **Deleting a folder deletes everything inside it.** Removing `logs/` recursively deletes every object stored under that prefix, including nested folders — the same as Cyberduck, Transmit, or the AWS Console. This can mean a lot of objects behind one confirmation, so double-check the prefix before confirming.
-- **Placeholder files are hidden by default.** Zero-byte marker files that other tools drop into a prefix to keep it visible — `.file_placeholder`, `.keep`, `.gitkeep`, `.s3keep`, `.bzEmpty`, `.placeholder`, `.dir`, `.emptyfolderplaceholder` — are hidden from the listing automatically. They still exist in the bucket; toggle them back on with the eye icon in the toolbar, the `H` key, the command palette, or the link in the status bar. Object counts and total size in the status bar reflect only what's currently visible.
-- **New folder** writes a zero-byte object whose key ends in `/`, which is how a prefix becomes visible in listings.
+- **Placeholder files are hidden by default.** Zero-byte marker files that other tools drop into a prefix to keep it visible — `.file_placeholder`, `.keep`, `.gitkeep`, `.s3keep`, `.bzEmpty`, `.placeholder`, `.dir`, `.emptyfolderplaceholder` — are hidden from the listing automatically. **Directory markers count too:** any zero-byte key ending in `/` is the object a console or SDK writes to hold an empty folder open, and it comes back from S3 both as that object and as a prefix, so left alone it draws twice — once as the folder row you can open, once as a phantom file row named `sub/` that opens nothing. They still exist in the bucket; toggle them back on with the eye icon in the toolbar, the `H` key, the command palette, or the link in the status bar. Object counts and total size in the status bar reflect only what's currently visible.
+- **The eye only governs marker files.** If a prefix has none, revealing them changes nothing on screen, so the button says so rather than looking broken. It is not a way to see objects nested in subfolders — that is what flattening is for.
+- **New folder** writes a zero-byte object whose key ends in `/`, which is how a prefix becomes visible in listings. That marker is itself a placeholder, so it stays hidden while the folder row it creates does not.
 - **Cancelling an upload** stops the queue; it does not undo transfers that already finished. Files uploaded before you clicked **Cancel** stay in the bucket, a file interrupted mid-transfer is not written, and the dialog reports how many of the batch made it.
 - **Multiple downloads** are started one at a time with a short pause. Your browser may still ask permission for more than a few.
 - **Link lifetimes:** download links are signed for 60 seconds, grid thumbnails for 15 minutes, and share links for whatever you pick in the dialog.
@@ -216,8 +232,7 @@ Encryption at rest is not the same as safety while running:
 
 ## Technical details
 
-- **Two files** — `index.html` holds the markup, icons and all logic; `styles.css` holds the stylesheet. They must sit in the same folder. There is no build step and no npm.
-  To go back to a single file, paste the stylesheet into a `<style>` block in `<head>` and drop the `<link>`.
+- **One file** — `index.html` holds the markup, the stylesheet in a `<style>` block, the icon sprite and all logic. Nothing sits beside it. There is no build step and no npm.
 - **Two remote dependencies at load time:** the AWS SDK v2 from the official AWS CDN, and the fonts from Google Fonts. The file therefore needs network access the first time it runs; it is self-contained, not offline.
 - **Type** — Space Grotesk for the interface, IBM Plex Mono for anything that came out of S3: keys, sizes, dates, regions and URIs.
 - **Icons** — an inline SVG sprite, so no emoji and no image requests.
