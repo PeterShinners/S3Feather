@@ -883,7 +883,7 @@ kbd{
       <div class="selbar" id="selbar" role="toolbar" aria-label="Selection actions">
         <div class="selbar-c" id="selbar-c"></div>
         <div class="divide"></div>
-        <button class="btn btn-g btn-sm" onclick="downloadSelected()"><svg class="ic ic-sm"><use href="#i-down"/></svg> Download</button>
+        <button class="btn btn-g btn-sm" id="b-dl-sel" onclick="downloadSelected()"><svg class="ic ic-sm"><use href="#i-down" id="ic-dl-sel"/></svg> Download</button>
         <button class="btn btn-d btn-sm" onclick="deleteSelected()"><svg class="ic ic-sm"><use href="#i-trash"/></svg> Delete</button>
         <button class="ibtn" onclick="clearSel()" aria-label="Clear selection"><svg class="ic ic-sm"><use href="#i-x"/></svg></button>
       </div>
@@ -1072,6 +1072,26 @@ kbd{
     <div class="m-f">
       <button class="btn btn-s" id="delp-stop" onclick="cancelDelete()">Stop</button>
       <button class="btn btn-p" id="delp-done" disabled onclick="hideModal('m-delp');refresh()">Done</button>
+    </div>
+  </div>
+</div>
+
+<div class="back" id="m-zip">
+  <div class="modal" style="max-width:420px" role="dialog" aria-modal="true" aria-labelledby="m-zip-t" tabindex="-1">
+    <div class="m-h">
+      <div class="m-t" id="m-zip-t">Zipping</div>
+    </div>
+    <div class="m-b">
+      <div class="up-h">
+        <span class="up-n mo" id="zip-stage">Preparing…</span>
+        <span class="up-p" id="zip-count"></span>
+      </div>
+      <div class="trk" id="zip-trk"><i id="zip-bar" style="width:0"></i></div>
+      <p class="hint" id="zip-note" style="margin-top:12px"></p>
+    </div>
+    <div class="m-f">
+      <button class="btn btn-s" id="zip-stop" onclick="cancelZip()">Stop</button>
+      <button class="btn btn-p" id="zip-done" disabled onclick="hideModal('m-zip')">Done</button>
     </div>
   </div>
 </div>
@@ -1342,6 +1362,8 @@ function onKey(e) {
       // Same reasoning for a delete: hiding the dialog would leave batches
       // running with nothing on screen to say so.
       if (open.id === 'm-delp' && delBusy) { cancelDelete(); return; }
+      // Same for a zip: hiding it would leave the fetches running unseen.
+      if (open.id === 'm-zip' && zipBusy) { cancelZip(); return; }
       if (open.id === 'm-delp' && !delBusy) { hideModal('m-delp'); refresh(); return; }
       hideModal(open.id);
       return;
@@ -2039,7 +2061,8 @@ function listHTML() {
       </div>
       <div class="cell-s col-s">${dir ? '—' : fmtSize(it.size)}</div>
       <div class="cell-d col-d" title="${it.date ? x(fmtWhen(it.date)) : ''}">${it.date ? fmtDate(it.date) : '—'}</div>
-      <div class="cell-a">${dir ? '' : `
+      <div class="cell-a">${dir ? `
+        <button class="abtn" data-a="zip" aria-label="Download as zip"><svg class="ic ic-sm"><use href="#i-zip"/></svg></button>` : `
         <button class="abtn" data-a="dl" aria-label="Download"><svg class="ic ic-sm"><use href="#i-down"/></svg></button>
         <button class="abtn" data-a="sh" aria-label="Share link"><svg class="ic ic-sm"><use href="#i-link"/></svg></button>`}
         <button class="abtn rm" data-a="rm" aria-label="Delete"><svg class="ic ic-sm"><use href="#i-trash"/></svg></button>
@@ -2081,6 +2104,7 @@ function onListClick(e) {
   if (act) {
     e.stopPropagation();
     if (act.dataset.a === 'dl') downloadItem(it);
+    else if (act.dataset.a === 'zip') zipItem(it);
     else if (act.dataset.a === 'sh') showShare(it);
     else if (act.dataset.a === 'rm') askDelete([it.key]);
     return;
@@ -2172,6 +2196,12 @@ function updateSelUI() {
     let bytes = 0;
     for (const it of items) if (it.size && selKeys.has(it.key)) bytes += it.size;
     el('selbar-c').innerHTML = `${n} selected <span>${fmtSize(bytes)}</span>`;
+    /* Says what the button will do rather than making the zip a separate
+       action you have to know about: more than one object cannot be saved as
+       one download, so it is an archive either way. */
+    const zip = n > 1 || [...selKeys].some(k => (items.find(i => i.key === k) || {}).type === 'folder');
+    el('b-dl-sel').lastChild.textContent = zip ? ' Download as zip' : ' Download';
+    el('ic-dl-sel').setAttribute('href', zip ? '#i-zip' : '#i-down');
   }
   const all = items.length > 0 && n === items.length;
   el('cbox-all').classList.toggle('on', all);
@@ -2264,6 +2294,7 @@ function paletteSources() {
   const A = (t, i, run, k) => out.push({ g: 'Commands', t, i, run, k });
   if (S3) {
     A('Upload files', 'i-up', triggerUpload);
+    if (selKeys.size) A(`Download ${selKeys.size} selected as a zip`, 'i-zip', zipSelected);
     A('New folder', 'i-dir-plus', showMkdir);
     A('Refresh', 'i-refresh', refresh, 'R');
     if (nextToken) A('Fetch next 1,000 objects from the bucket', 'i-down', loadMore, 'M');
@@ -2549,7 +2580,15 @@ function isImage(name) {
   return IMG.has((name.split('.').pop() || '').toLowerCase());
 }
 
-function downloadItem(item) {
+/* A key can carry a path, and in a flattened listing every name does. A
+   slash is not legal in a download filename or in a Content-Disposition
+   header, so the last segment is what gets saved — otherwise the browser
+   either mangles the name or drops the header and saves the raw key. */
+function dlName(item) {
+  return (item.name || item.key).split('/').filter(Boolean).pop() || 'object';
+}
+
+function downloadItem(item, quiet) {
   if (!S3 || item.type === 'folder') return;
   // No target="_blank" here: the presigned URL already carries
   // response-content-disposition: attachment, so a plain same-tab click
@@ -2557,20 +2596,29 @@ function downloadItem(item) {
   // makes the browser treat each one as a popup — fine for the first click,
   // but every subsequent one in a batch happens after an `await`, outside
   // the original user gesture, so browsers silently block them.
+  const fn = dlName(item);
   Object.assign(document.createElement('a'), {
-    href: signed(item.key, 60, item.name), download: item.name,
+    href: signed(item.key, 60, fn), download: fn,
   }).click();
-  toast(`Downloading ${item.name}`, 'ok');
+  // Quiet in a batch: one toast per file buried the screen under hundreds of
+  // them, each outliving the next by three seconds.
+  if (!quiet) toast(`Downloading ${fn}`, 'ok');
 }
 
+/* One object saves as itself. Anything more — several objects, or a prefix —
+   becomes a single archive, because the alternative was a queue of separate
+   downloads that browsers throttle, prompt about, and eventually refuse, and
+   that could not preserve a folder structure anyway. */
 async function downloadSelected() {
-  const files = [...selKeys].map(k => items.find(i => i.key === k)).filter(i => i && i.type === 'file');
-  if (!files.length) return toast('No files selected — prefixes cannot be downloaded', 'err');
-  if (files.length > 8) toast(`Starting ${files.length} downloads — your browser may ask to allow them`, 'inf');
-  for (const f of files) {
-    downloadItem(f);
-    await new Promise(r => setTimeout(r, 350));   // browsers drop bursts
-  }
+  if (!S3 || !selKeys.size) return;
+  const picked = [...selKeys].map(k => items.find(i => i.key === k)).filter(Boolean);
+  if (!picked.length) return;
+
+  const only = picked.length === 1 && picked[0].type === 'file' ? picked[0] : null;
+  if (only) return downloadItem(only);
+
+  // No await before this: the save picker has to open inside the click.
+  return zipRun(picked, zipSuggestedName(picked));
 }
 
 function showShare(item) {
@@ -2596,24 +2644,530 @@ function copyPresign() {
   }
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   ZIP DOWNLOAD
+
+   Selecting eight objects used to fire eight sequential downloads, and
+   the browser starts asking permission somewhere around the third. One
+   archive is one save dialog.
+
+   Entries are STORED, never deflated. Bucket contents are overwhelmingly
+   already-compressed bytes — jpg, zip, mp4, tar.gz — so deflate would
+   spend CPU to save nothing, and STORE means no compressor to ship: a
+   local header, the bytes as they arrive, a CRC32, and a central
+   directory at the end.
+
+   Sizes come from the listing, so they are known before a byte is read,
+   but the CRC is not. Every entry therefore uses the streaming form:
+   flag bit 3 set, zeroes in the local header, and the real CRC and sizes
+   in a data descriptor after the payload. That is also what lets the
+   whole archive go straight to disk without ever being seekable.
+   ═══════════════════════════════════════════════════════════════════ */
+/* Two meanings, deliberately two names. ZIP_MAX32 is the sentinel written
+   into a 32-bit field to say "read the real value from the ZIP64 extra" and
+   must be exactly this value or no unzipper will understand it. ZIP_BIG_AT is
+   the threshold at which we switch an entry to ZIP64 framing. They are the
+   same number in production; keeping them apart is what makes the ZIP64 path
+   testable without generating four gigabytes. */
+const ZIP_MAX32 = 0xFFFFFFFF;
+const ZIP_BIG_AT = 0xFFFFFFFF;
+/* In-memory ceiling for the fallback sink. iOS Safari kills a tab well
+   before a desktop browser would, so this is deliberately conservative. */
+const ZIP_BLOB_CAP = 512 * 1024 * 1024;
+/* Above this, prefer browser storage over the JS heap even when the heap
+   would technically cope. */
+const ZIP_OPFS_FROM = 64 * 1024 * 1024;
+const ZIP_TMP = '.s3feather-zip-tmp';
+
+let CRC_TBL = null;
+function crcTable() {
+  if (CRC_TBL) return CRC_TBL;
+  CRC_TBL = new Int32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    CRC_TBL[i] = c;
+  }
+  return CRC_TBL;
+}
+// Chainable across chunks: pass the previous return value back in.
+function crc32(buf, prev = 0) {
+  const t = crcTable();
+  let c = ~prev;
+  for (let i = 0; i < buf.length; i++) c = t[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (~c) >>> 0;
+}
+
+// ZIP stores MS-DOS timestamps: 2-second resolution, epoch 1980.
+function dosTime(d) {
+  if (!(d instanceof Date) || isNaN(d) || d.getFullYear() < 1980) return { t: 0, d: 0x21 };
+  return {
+    t: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    d: ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+  };
+}
+
+/* Little-endian record builder. ZIP is all fixed-width little-endian
+   fields, so this keeps the header code readable rather than a wall of
+   setUint16 calls with hand-counted offsets. */
+class Rec {
+  constructor(n) { this.a = new Uint8Array(n); this.v = new DataView(this.a.buffer); this.p = 0; }
+  u16(x) { this.v.setUint16(this.p, x, true); this.p += 2; return this; }
+  u32(x) { this.v.setUint32(this.p, x >>> 0, true); this.p += 4; return this; }
+  u64(x) { this.v.setBigUint64(this.p, BigInt(x), true); this.p += 8; return this; }
+  raw(u8) { this.a.set(u8, this.p); this.p += u8.length; return this; }
+  out() { return this.a.subarray(0, this.p); }
+}
+
+class ZipWriter {
+  constructor(sink) { this.sink = sink; this.off = 0; this.dir = []; this.any64 = false; }
+
+  async put(u8) { await this.sink.write(u8); this.off += u8.length; }
+
+  /* One entry. `size` is what the listing said, used only to decide
+     whether this entry needs ZIP64 framing; the descriptor carries what
+     was actually read, so a key that changed under us still produces a
+     valid archive. */
+  async entry(name, size, chunks) {
+    const nm = new TextEncoder().encode(name);
+    const { t, d } = dosTime(new Date());
+    const at = this.off;
+    /* Decided once, here, from the declared size and this entry's own offset,
+       and then reused for the descriptor and the central record. The local and
+       central headers must agree on the version they claim to need: when they
+       disagreed, Info-ZIP unzip decoded the UTF-8 name from one as UTF-8 and
+       from the other as CP437 and warned about a mismatching local filename. */
+    const big = size >= ZIP_BIG_AT || at >= ZIP_BIG_AT;
+    if (big) this.any64 = true;
+
+    const h = new Rec(30 + nm.length + (big ? 20 : 0));
+    h.u32(0x04034b50)          // local file header
+     .u16(big ? 45 : 20)       // version needed: 4.5 for ZIP64
+     .u16(0x0808)              // bit 3 data descriptor, bit 11 UTF-8 names
+     .u16(0)                   // method: STORE
+     .u16(t).u16(d)
+     .u32(0).u32(0).u32(0)     // crc, sizes: unknown until the payload is read
+     .u16(nm.length).u16(big ? 20 : 0)
+     .raw(nm);
+    // A zeroed ZIP64 extra in the local header is what tells an unzipper the
+    // trailing descriptor carries 8-byte sizes rather than 4.
+    if (big) h.u16(0x0001).u16(16).u64(0).u64(0);
+    await this.put(h.out());
+
+    let crc = 0, n = 0;
+    for await (const c of chunks) {
+      crc = crc32(c, crc);
+      n += c.length;
+      await this.put(c);
+    }
+
+    /* The local header is already on disk and cannot be revised, so an object
+       that grew past the 32-bit limit after the listing reported it small
+       would produce a quietly invalid archive. Refuse instead. */
+    if (!big && n >= ZIP_BIG_AT) {
+      throw new Error(`${name} grew past 4 GB while downloading — archive would be invalid`);
+    }
+    const dd = new Rec(big ? 24 : 16);
+    dd.u32(0x08074b50).u32(crc);
+    if (big) dd.u64(n).u64(n); else dd.u32(n).u32(n);
+    await this.put(dd.out());
+
+    this.dir.push({ nm, t, d, crc, size: n, at, z64: big });
+    return n;
+  }
+
+  async finish() {
+    const start = this.off;
+    for (const e of this.dir) {
+      /* An entry needs ZIP64 if its size or its offset is past the 32-bit
+         field. The spec says the extra holds only the fields whose 32-bit
+         counterpart is the sentinel, but an offset-only extra makes Info-ZIP
+         unzip warn about a mismatching local filename — it expects the sizes
+         first. So once an entry is ZIP64 at all, it is ZIP64 in full: all
+         three 32-bit fields become sentinels and all three real values live
+         in the extra. Self-consistent, and what 7-Zip and Java emit. */
+      const z64 = e.z64;      // exactly what the local header claimed
+      const c = new Rec(46 + e.nm.length + (z64 ? 28 : 0));
+      c.u32(0x02014b50)                       // central directory header
+       .u16(z64 ? 45 : 20).u16(z64 ? 45 : 20)
+       .u16(0x0808).u16(0).u16(e.t).u16(e.d).u32(e.crc)
+       .u32(z64 ? ZIP_MAX32 : e.size).u32(z64 ? ZIP_MAX32 : e.size)
+       .u16(e.nm.length).u16(z64 ? 28 : 0).u16(0)
+       .u16(0).u16(0).u32(0)                  // disk, attrs
+       .u32(z64 ? ZIP_MAX32 : e.at)
+       .raw(e.nm);
+      if (z64) c.u16(0x0001).u16(24).u64(e.size).u64(e.size).u64(e.at);
+      await this.put(c.out());
+    }
+
+    const size = this.off - start, n = this.dir.length;
+    const need64 = this.any64 || n > 0xFFFF || start >= ZIP_BIG_AT || size >= ZIP_BIG_AT;
+
+    if (need64) {
+      const z64at = this.off;
+      const z = new Rec(56);
+      z.u32(0x06064b50).u64(44)               // ZIP64 end of central directory
+       .u16(45).u16(45).u32(0).u32(0)
+       .u64(n).u64(n).u64(size).u64(start);
+      await this.put(z.out());
+      const loc = new Rec(20);
+      loc.u32(0x07064b50).u32(0).u64(z64at).u32(1);
+      await this.put(loc.out());
+    }
+
+    const e = new Rec(22);
+    e.u32(0x06054b50).u16(0).u16(0)
+     .u16(Math.min(n, 0xFFFF)).u16(Math.min(n, 0xFFFF))
+     .u32(size >= ZIP_BIG_AT ? ZIP_MAX32 : size)
+     .u32(start >= ZIP_BIG_AT ? ZIP_MAX32 : start)
+     .u16(0);
+    await this.put(e.out());
+  }
+}
+
+/* ── Where the archive goes ───────────────────────────────────────────
+   Three sinks, best first. The picker streams to disk and is bounded
+   only by free space, but exists on desktop Chromium alone. Browser
+   storage keeps the archive off the JS heap and works on Android Chrome,
+   Firefox and any browser with OPFS write streams. The heap is last and
+   capped.
+   ─────────────────────────────────────────────────────────────────── */
+async function zipSinkPicker(name) {
+  if (!window.showSaveFilePicker) return null;
+  let handle;
+  try {
+    // Must run inside the click that started this, so it is the first
+    // thing zipRun does — before any listing or await.
+    handle = await window.showSaveFilePicker({
+      suggestedName: name,
+      types: [{ description: 'ZIP archive', accept: { 'application/zip': ['.zip'] } }],
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') return 'cancel';
+    return null;
+  }
+  let w;
+  try { w = await handle.createWritable(); } catch { return null; }
+  return {
+    kind: 'stream',
+    label: 'streaming to disk',
+    note: 'Streaming straight to the file you picked — limited only by free disk space.',
+    write: b => w.write(b),
+    close: () => w.close(),
+    // abort() discards everything written, so a stopped zip leaves no half file.
+    abort: () => w.abort().catch(() => {}),
+  };
+}
+
+async function zipSinkOPFS(name, total) {
+  if (!navigator.storage || !navigator.storage.getDirectory) return null;
+  let root, handle, w;
+  try {
+    root = await navigator.storage.getDirectory();
+    // Safari exposes OPFS but only synchronous access handles, which need a
+    // worker. No write stream here means fall through to the heap.
+    handle = await root.getFileHandle(ZIP_TMP, { create: true });
+    if (!handle.createWritable) return null;
+    if (navigator.storage.estimate) {
+      const est = await navigator.storage.estimate();
+      const free = (est.quota || 0) - (est.usage || 0);
+      if (free && total + 32 * 1024 * 1024 > free) return null;
+    }
+    w = await handle.createWritable();
+  } catch { return null; }
+
+  const drop = () => { try { root.removeEntry(ZIP_TMP).catch(() => {}); } catch {} };
+  return {
+    kind: 'opfs',
+    label: 'via browser storage',
+    note: 'Building in browser storage, then saving — keeps the archive off the tab’s memory.',
+    write: b => w.write(b),
+    close: async () => {
+      await w.close();
+      saveBlob(await handle.getFile(), name);
+      // The download reads from the snapshot, so give it room before cleanup.
+      setTimeout(drop, 180000);
+    },
+    abort: async () => { try { await w.abort(); } catch {} drop(); },
+  };
+}
+
+function zipSinkBlob(name) {
+  const parts = [];
+  return {
+    kind: 'blob',
+    label: 'in memory',
+    note: `Building in memory — capped at ${fmtSize(ZIP_BLOB_CAP)} on this browser.`,
+    // Not copied: every chunk here is either a fresh read from the network or a
+    // header this writer owns and never touches again.
+    write: b => { parts.push(b); },
+    close: async () => saveBlob(new Blob(parts, { type: 'application/zip' }), name),
+    abort: async () => { parts.length = 0; },
+  };
+}
+
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  Object.assign(document.createElement('a'), { href: url, download: name }).click();
+  setTimeout(() => URL.revokeObjectURL(url), 180000);
+}
+
+/* Bytes for one object, streamed. A presigned URL plus fetch keeps peak
+   memory at one chunk; getObject through the SDK would materialise the
+   whole object first, which a 3.7 GB key does not survive. */
+async function* zipObjectChunks(key, ac, onBytes) {
+  const res = await fetch(signed(key, 3600), { signal: ac.signal });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText || 'fetch failed'}`);
+  if (!res.body || !res.body.getReader) {
+    const one = new Uint8Array(await res.arrayBuffer());
+    if (onBytes) onBytes(one.length);
+    yield one;
+    return;
+  }
+  const r = res.body.getReader();
+  for (;;) {
+    const { done, value } = await r.read();
+    if (done) break;
+    if (value && value.length) {
+      if (onBytes) onBytes(value.length);
+      yield value;
+    }
+  }
+}
+
+/* ── The zip run ──────────────────────────────────────────────────── */
+let zipBusy = false, zipAbort = null;
+
+function zipSet({ stage, count, pct, note, ind }) {
+  if (stage !== undefined) el('zip-stage').textContent = stage;
+  if (count !== undefined) el('zip-count').textContent = count;
+  if (note !== undefined) el('zip-note').textContent = note;
+  if (ind !== undefined) el('zip-trk').classList.toggle('ind', ind);
+  if (pct !== undefined) el('zip-bar').style.width = pct + '%';
+}
+
+function zipFinish(cls, stage, note, pct = 100) {
+  el('zip-trk').classList.remove('ind');
+  el('zip-bar').className = cls;              // '' | 'ok' | 'no' | 'off'
+  el('zip-bar').style.width = pct + '%';
+  el('zip-stage').textContent = stage;
+  el('zip-note').textContent = note;
+  el('zip-stop').disabled = true;
+  el('zip-done').disabled = false;
+  zipBusy = false;
+  zipAbort = null;
+}
+
+// Lands between objects: an entry is either whole in the archive or not in it.
+function cancelZip() {
+  if (!zipBusy || !zipAbort) return;
+  zipAbort.abort();
+  zipSet({ note: 'Stopping — the partial archive will be discarded.' });
+  el('zip-stop').disabled = true;
+}
+
+/* Names inside the archive are relative to where you are standing, so
+   zipping a folder from `sync0/` gives `propustka_Novanta/scan.jpg` and
+   the folder survives the round trip. Anything that could escape the
+   extraction directory is neutralised. */
+function zipEntryName(key, taken) {
+  let n = (key.startsWith(prefix) ? key.slice(prefix.length) : key)
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .split('/').filter(s => s !== '.' && s !== '..').join('/');
+  if (!n) n = key.split('/').filter(Boolean).pop() || 'object';
+  if (taken.has(n)) {
+    const dot = n.lastIndexOf('.'), stem = dot > 0 ? n.slice(0, dot) : n, ext = dot > 0 ? n.slice(dot) : '';
+    let i = 2;
+    while (taken.has(`${stem} (${i})${ext}`)) i++;
+    n = `${stem} (${i})${ext}`;
+  }
+  taken.add(n);
+  return n;
+}
+
+function zipSuggestedName(picks) {
+  if (picks.length === 1 && picks[0].type === 'folder') return picks[0].name + '.zip';
+  const seg = prefix.split('/').filter(Boolean).pop();
+  return (seg || bucket || 'objects') + '.zip';
+}
+
+function zipSelected() {
+  if (!S3 || !selKeys.size) return;
+  const picks = [...selKeys].map(k => items.find(i => i.key === k)).filter(Boolean);
+  if (!picks.length) return;
+  return zipRun(picks, zipSuggestedName(picks));
+}
+function zipItem(it) { return zipRun([it], zipSuggestedName([it])); }
+
+async function zipRun(picks, name) {
+  if (!S3 || zipBusy) return;
+
+  // The save picker has to be opened inside the click that started this, so
+  // it goes first — before the listing, before anything async of our own.
+  const picked = await zipSinkPicker(name);
+  if (picked === 'cancel') return;
+  let sink = picked;
+
+  zipBusy = true;
+  zipAbort = new AbortController();
+  el('zip-bar').className = '';
+  el('zip-stop').disabled = false;
+  el('zip-done').disabled = true;
+  zipSet({ stage: 'Preparing…', count: '', pct: 0, note: '', ind: false });
+  showModal('m-zip');
+  await paintTick();
+
+  // Out here so the catch can report where the work actually reached: an
+  // aborted fetch throws, and snapping the bar to full would claim the
+  // archive finished.
+  let done = 0, wrote = 0, total = 0, count = 0;
+
+  try {
+    /* Phase 1 — what goes in. Folders are walked the same way a folder
+       delete walks them, so a zip of a prefix holds everything under it,
+       nested folders included. No total is knowable yet, so this counts up. */
+    const found = [];
+    const dirs = picks.filter(p => p.type === 'folder');
+    if (dirs.length) {
+      zipSet({ stage: 'Finding objects…', ind: true });
+      for (const d of dirs) {
+        found.push(...await listAllObjectsUnder(d.key, {
+          onCount: async n => {
+            zipSet({ count: `${found.length + n} found` });
+            await paintTick();
+          },
+          stop: () => zipAbort.signal.aborted,
+        }));
+        if (zipAbort.signal.aborted) break;
+      }
+    }
+    for (const p of picks) if (p.type === 'file') found.push({ key: p.key, size: p.size });
+
+    if (zipAbort.signal.aborted) {
+      await sinkAbort(sink);
+      return zipFinish('off', 'Stopped', 'Nothing was written.', 0);
+    }
+
+    /* Keys ending in '/' are the zero-byte markers that hold an empty
+       prefix open. They are not files, and an unzipper makes the
+       directories it needs from the entry names anyway. */
+    const taken = new Set();
+    const entries = found
+      .filter(o => !o.key.endsWith('/'))
+      .map(o => ({ key: o.key, size: o.size || 0, name: zipEntryName(o.key, taken) }));
+
+    if (!entries.length) {
+      await sinkAbort(sink);
+      return zipFinish('no', 'Nothing to zip', 'The selection holds no objects — only empty prefixes.', 100);
+    }
+
+    total = entries.reduce((a, e) => a + e.size, 0);
+    count = entries.length;
+
+    // Phase 2 — pick a sink if the picker was not available.
+    if (!sink && total >= ZIP_OPFS_FROM) sink = await zipSinkOPFS(name, total);
+    if (!sink) {
+      if (total > ZIP_BLOB_CAP) {
+        return zipFinish('no', 'Too large for this browser',
+          `${fmtSize(total)} across ${entries.length} ${entries.length === 1 ? 'object' : 'objects'}. `
+          + `This browser cannot stream an archive to disk, `
+          + `and building it in memory is capped at ${fmtSize(ZIP_BLOB_CAP)}. `
+          + `Select fewer objects, or use a Chromium browser on a desktop, where the archive is written straight to the file you choose.`, 100);
+      }
+      sink = zipSinkBlob(name);
+    }
+
+    zipSet({ note: sink.note });
+
+    // Phase 3 — write it.
+    const zw = new ZipWriter(sink);
+    const began = Date.now();
+    /* A single large object used to move nothing: the bar advanced only
+       between entries, so a 2 GB key looked identical to a hang. Bytes are
+       therefore reported as they stream, throttled to ~5/s so a fast local
+       endpoint does not spend the whole download rewriting the DOM. */
+    let live = 0, painted = 0;
+    const show = (name, i) => {
+      const at = wrote + live;
+      const secs = (Date.now() - began) / 1000;
+      zipSet({
+        stage: name,
+        count: `${i} of ${entries.length}`,
+        pct: total ? Math.min(99.5, (at / total) * 100) : 50,
+        note: `${fmtSize(at)} of ${fmtSize(total)}`
+          + (secs > 1 ? ` · ${fmtSize(at / secs)}/s` : '')
+          + ` · ${sink.label}`,
+        ind: false,
+      });
+    };
+
+    for (const e of entries) {
+      if (zipAbort.signal.aborted) break;
+      live = 0;
+      show(e.name, done + 1);
+      await paintTick();
+      const onBytes = n => {
+        live += n;
+        if (Date.now() - painted < 200) return;
+        painted = Date.now();
+        show(e.name, done + 1);
+      };
+      wrote += await zw.entry(e.name, e.size, zipObjectChunks(e.key, zipAbort, onBytes));
+      done++;
+      live = 0;
+    }
+
+    if (zipAbort.signal.aborted) {
+      await sinkAbort(sink);
+      return zipFinish('off', 'Stopped',
+        `Stopped after ${done} of ${entries.length} objects. The partial archive was discarded.`,
+        total ? (wrote / total) * 100 : 0);
+    }
+
+    zipSet({ stage: 'Finishing…', ind: false, pct: 100 });
+    await zw.finish();
+    await sink.close();
+    zipFinish('ok', 'Saved',
+      `${entries.length} ${entries.length === 1 ? 'object' : 'objects'} · ${fmtSize(wrote)} · ${name}`);
+  } catch (err) {
+    await sinkAbort(sink);
+    const aborted = err && (err.name === 'AbortError' || zipAbort && zipAbort.signal.aborted);
+    const reached = total ? Math.min(100, (wrote / total) * 100) : 0;
+    zipFinish(aborted ? 'off' : 'no', aborted ? 'Stopped' : 'Failed',
+      aborted
+        ? `Stopped after ${done} of ${count} ${count === 1 ? 'object' : 'objects'}. The partial archive was discarded.`
+        : ((err && err.message) || 'unknown error'),
+      aborted ? reached : 100);
+  }
+}
+
+async function sinkAbort(sink) { if (sink && sink.abort) { try { await sink.abort(); } catch {} } }
+
 /* ═══════════════════════════════════════════════════════════════════
    DELETE
    ═══════════════════════════════════════════════════════════════════ */
-async function listAllUnderPrefix(pfx, opts = {}) {
-  const keys = [];
+async function listAllObjectsUnder(pfx, opts = {}) {
+  const out = [];
   let token;
   do {
     const data = await s3api('listObjectsV2', {
       Bucket: bucket, Prefix: pfx, MaxKeys: 1000, ContinuationToken: token,
     });
-    for (const o of (data.Contents || [])) keys.push(o.Key);
+    for (const o of (data.Contents || [])) out.push({ key: o.Key, size: o.Size });
     // Reported per page, not per key: a prefix with 40,000 objects is 40 calls,
     // and without this the dialog would sit on "Preparing…" for all of them.
-    if (opts.onCount) await opts.onCount(keys.length);
+    if (opts.onCount) await opts.onCount(out.length);
     if (opts.stop && opts.stop()) break;
     token = data.IsTruncated ? data.NextContinuationToken : undefined;
   } while (token);
-  return keys;
+  return out;
+}
+
+// Delete only needs keys; zipping needs sizes too, so the walk is shared.
+async function listAllUnderPrefix(pfx, opts = {}) {
+  return (await listAllObjectsUnder(pfx, opts)).map(o => o.key);
 }
 
 function askDelete(keys) {
@@ -2656,7 +3210,17 @@ let delBusy = false, delAbort = false;
    batch and the whole operation looks like a single jump at the end. Costs
    ~32ms against a network round trip — invisible. */
 function paintTick() {
-  return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  /* Raced against a timer, because a backgrounded tab stops firing frames
+     altogether: waiting on rAF alone would park a long zip or delete between
+     items until the tab was looked at again, which is indistinguishable from
+     a hang. The timer is the floor; when the tab is visible the frames win
+     and cost ~32ms. */
+  return new Promise(r => {
+    let done = false;
+    const fire = () => { if (!done) { done = true; r(); } };
+    requestAnimationFrame(() => requestAnimationFrame(fire));
+    setTimeout(fire, 250);
+  });
 }
 
 function delpSet({ stage, count, pct, note, ind }) {

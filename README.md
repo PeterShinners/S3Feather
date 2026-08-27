@@ -16,6 +16,7 @@ Live: [try it now!](https://wespeakenglish.github.io/S3Feather/)
 - **Multi-bucket** — save several connections and switch with one click
 - **S3-compatible** — AWS S3, MinIO, Cloudflare R2, Wasabi, DigitalOcean Spaces, Backblaze B2, Storj, and any S3-compatible endpoint
 - **File operations** — upload with per-file progress, download, delete one or many with progress you can stop
+- **Zip downloads** — selecting more than one object, or a prefix, downloads a single archive; there is no queue of separate downloads to babysit
 - **List and grid views** — grid shows real image thumbnails
 - **Presigned share links** — temporary download URLs, 5 minutes to 7 days
 - **Drag and drop** — drop files anywhere on the window to upload into the current prefix
@@ -87,6 +88,35 @@ The tree button beside the eye — or `F`, or the command palette — drops the 
 - **The footer changes to match** — `6 objects · 3.8 MB · all levels below sync0/` — because a prefix count means nothing when there are no folder rows.
 - **Paging is unchanged.** Still 1,000 keys per request, so a large subtree arrives over several **load next 1,000** clicks; the row cap and `[` / `]` work as they always do.
 - **Switching clears the filter and re-lists**, since it changes what is asked of S3 rather than how the answer is drawn. It is per session and resets when you disconnect.
+
+---
+
+## Downloading as a zip
+
+**Download** in the selection bar saves one file as itself and anything more as one archive — the button says which, and shows a zip icon once the selection needs one. There is no separate queue mode: firing a download per object meant browsers throttling them, prompting about them, eventually refusing them, and no way to keep a folder structure. Folder rows have their own zip button, which walks the prefix recursively — everything underneath, nested folders included.
+
+Entries are **stored, not deflated**. Bucket contents are overwhelmingly already-compressed bytes, so deflating would spend CPU to save nothing; it also means there is no compressor to ship, which keeps the whole feature inside the one file. Archives carry UTF-8 entry names and switch to **ZIP64** framing automatically when an object, the archive, or an entry's offset passes 4 GB.
+
+Where the archive is built depends on what the browser offers, and the dialog names the path it took:
+
+| Path | Where | Limit |
+|---|---|---|
+| Streaming to disk | Chrome, Edge and other Chromium on desktop | Free disk space |
+| Browser storage (OPFS) | Chrome and Firefox on Android, plus any browser with OPFS write streams | Storage quota |
+| In memory | Everything else, including iOS Safari | 512 MB, refused above that with an explanation |
+
+The first path asks where to save before anything is fetched, then pipes each object straight into that file, so peak memory is one chunk regardless of archive size. The second keeps the archive off the tab's heap by staging it in origin-private storage and saving when it is complete; the staging file is removed afterwards. The third holds everything in memory and is capped, because iOS Safari kills a tab well before a desktop browser would.
+
+**On mobile the first path does not exist** — no mobile browser implements the save picker. Phones get OPFS where available and memory otherwise, so a multi-gigabyte archive is a desktop job.
+
+Other behaviour worth knowing:
+
+- **Progress is reported in bytes, not just files.** The dialog shows objects done, bytes done against the total, the current rate, and which of the three paths is in use — so one slow 2 GB object is visibly downloading rather than looking frozen.
+- **It keeps running in a background tab.** Progress is painted between items via animation frames, which a hidden tab stops firing, so the wait is raced against a timer. Without that, switching away mid-archive parked the run until you looked back.
+- **Objects are streamed, never buffered whole.** Each one is fetched through a presigned URL and piped into the archive a chunk at a time, so a single 4 GB key costs no more memory than a small one.
+- **Stop lands between objects.** An entry is either complete in the archive or absent from it, and stopping discards the partial archive rather than leaving a file that looks openable.
+- **Empty-prefix markers are skipped.** Keys ending in `/` are not files; unzippers create the directories they need from the entry names.
+- **Names are relative to where you are standing**, so zipping a folder preserves it as a folder inside the archive. Duplicate names get ` (2)` appended, and any path segment that could escape the extraction directory is dropped.
 
 ---
 
@@ -211,7 +241,8 @@ Enter the URL in the **Endpoint** field. Path-style requests and Signature V4 ar
 - **The eye only governs marker files.** If a prefix has none, revealing them changes nothing on screen, so the button says so rather than looking broken. It is not a way to see objects nested in subfolders — that is what flattening is for.
 - **New folder** writes a zero-byte object whose key ends in `/`, which is how a prefix becomes visible in listings. That marker is itself a placeholder, so it stays hidden while the folder row it creates does not.
 - **Cancelling an upload** stops the queue; it does not undo transfers that already finished. Files uploaded before you clicked **Cancel** stay in the bucket, a file interrupted mid-transfer is not written, and the dialog reports how many of the batch made it.
-- **Multiple downloads** are started one at a time with a short pause. Your browser may still ask permission for more than a few.
+- **More than one object always means an archive.** A multi-object selection, or any prefix, goes through the zip path; only a single file is fetched directly. The browser therefore never sees a burst of downloads to prompt about.
+- **A single file saves under its last path segment.** A key can carry a path — in a flattened listing every name does — and a slash is not legal in a download filename, so `sub/deep/scan.jpg` saves as `scan.jpg`. Inside a zip the full relative path is kept.
 - **Link lifetimes:** download links are signed for 60 seconds, grid thumbnails for 15 minutes, and share links for whatever you pick in the dialog.
 
 ---
