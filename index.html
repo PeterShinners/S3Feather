@@ -57,13 +57,7 @@
     transition-duration:.001ms!important;scroll-behavior:auto!important}
 }
 
-/* 100vh on a mobile browser is the viewport with the URL bar subtracted out
-   of the maths — it measures the *largest* possible viewport, not the one you
-   can currently see. Paired with the overflow:hidden below, that pushed the
-   bottom of the shell (the status bar) under the browser chrome with no way to
-   scroll to it. dvh tracks the viewport that is actually on screen; the vh
-   declaration stays as the fallback for anything that does not know dvh. */
-html,body{height:100%;height:100dvh}
+html,body{height:100%}
 body{
   background:var(--bg);color:var(--ink);
   font-family:var(--ui);font-size:13.5px;line-height:1.5;
@@ -83,7 +77,7 @@ button{background:none;border:none;cursor:pointer}
 .ic-lg{width:22px;height:22px}
 
 /* ── Shell ───────────────────────────────────────────────────────── */
-.app{height:100vh;height:100dvh;display:grid;grid-template-rows:auto 1fr}
+.app{height:100vh;display:grid;grid-template-rows:auto 1fr}
 
 /* ── Header: the address bar is the hero ─────────────────────────── */
 .head{
@@ -384,14 +378,14 @@ button.addr-bkt:hover{background:var(--s2)}
 /* ── Status + selection ──────────────────────────────────────────── */
 .status{
   display:flex;align-items:center;gap:10px;flex:none;
-  height:28px;min-height:28px;padding:0 12px;border-top:1px solid var(--line);
+  height:28px;padding:0 12px;border-top:1px solid var(--line);
   background:var(--s1);font-family:var(--mo);font-size:11px;color:var(--ink3);
 }
 .status b{color:var(--ink2);font-weight:500}
 .status > *{white-space:nowrap}
 .warn-i{color:var(--amber);display:inline-flex;align-items:center;gap:5px;flex:none}
 .selbar{
-  position:absolute;left:50%;bottom:calc(var(--statusH,28px) + 14px);transform:translate(-50%,14px);
+  position:absolute;left:50%;bottom:42px;transform:translate(-50%,14px);
   display:flex;align-items:center;gap:8px;padding:7px 8px 7px 14px;
   background:var(--s3);border:1px solid var(--line2);border-radius:var(--r3);
   box-shadow:var(--sh);opacity:0;pointer-events:none;
@@ -584,7 +578,7 @@ kbd{
 .pal-f span{display:inline-flex;align-items:center;gap:5px}
 
 /* ── Toasts ──────────────────────────────────────────────────────── */
-.toasts{position:fixed;bottom:calc(var(--statusH,28px) + 10px);right:14px;z-index:400;display:flex;flex-direction:column;
+.toasts{position:fixed;bottom:38px;right:14px;z-index:400;display:flex;flex-direction:column;
   align-items:flex-end;gap:7px;pointer-events:none;max-width:330px}
 .toast{
   display:flex;align-items:flex-start;gap:9px;padding:9px 12px;
@@ -615,7 +609,6 @@ kbd{
   .work{grid-template-columns:1fr}
   .side{
     position:fixed;top:56px;bottom:0;left:0;width:min(268px,84vw);z-index:100;
-    max-height:calc(100dvh - 56px);
     transform:translateX(-100%);transition:transform .2s;
     box-shadow:var(--sh);
     /* Flicking the connection list must not scroll the file listing behind it. */
@@ -645,22 +638,6 @@ kbd{
 @media (max-width:560px){
   .cols,.row,.skel-row{grid-template-columns:32px 1fr 68px}
   .cell-s,.col-s{display:none}
-
-  /* The status bar carries the only always-visible controls for a partial
-     listing and for hidden placeholders. On a phone a single nowrap row pushes
-     those links off the right edge, where nothing can reach them — so the bar
-     wraps and takes whatever height it needs. The selection bar and the toasts
-     read that height back, so neither can come to rest on top of it. */
-  .status{
-    height:auto;flex-wrap:wrap;
-    column-gap:10px;row-gap:1px;padding:5px 12px;line-height:1.45;
-  }
-  /* A flexible spacer would claim the whole first line and drop every other
-     item onto the second. Packed left, they read in order instead. */
-  .status .bar-gap{display:none}
-  #st-info,#st-trunc,#st-hidden{white-space:normal}
-  /* Flat mode puts a full key prefix in here, which has no spaces to break at. */
-  #st-info .mo{word-break:break-all}
 }
 @media (max-width:480px){
   #st-endpoint{display:none}
@@ -1361,24 +1338,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   el('st-list').addEventListener('click', onListClick);
   el('st-list').addEventListener('dblclick', onListDbl);
-
-  trackStatusHeight();
 });
-
-/* The status bar is a fixed 28px row on a desktop and a wrapped two- or
-   three-line block on a phone. The floating selection bar and the toast stack
-   both sit directly above it, so they read the measured height back rather than
-   assuming the desktop one. The CSS fallback keeps the desktop geometry exact
-   if this never runs. */
-function trackStatusHeight() {
-  const bar = document.querySelector('.status');
-  if (!bar) return;
-  const apply = () => document.documentElement.style.setProperty(
-    '--statusH', Math.round(bar.getBoundingClientRect().height) + 'px');
-  apply();
-  if (window.ResizeObserver) new ResizeObserver(apply).observe(bar);
-  else window.addEventListener('resize', apply);
-}
 
 /* ═══════════════════════════════════════════════════════════════════
    KEYBOARD
@@ -2887,6 +2847,17 @@ async function zipSinkPicker(name) {
     if (e && e.name === 'AbortError') return 'cancel';
     return null;
   }
+  /* The picker creates the file the moment it resolves — before a byte is
+     written — so a run that never reaches finish() leaves a 0-byte archive
+     sitting in the download folder unless it is unlinked as well.
+
+     Only a file that was empty when we opened it is ours to delete. Picking an
+     existing archive and then stopping must leave that archive exactly as it
+     was: abort() already declines to commit over it, and removing it would
+     turn a cancelled download into data loss. */
+  let ours = false;
+  try { ours = (await handle.getFile()).size === 0; } catch { /* assume not */ }
+
   let w;
   try { w = await handle.createWritable(); } catch { return null; }
   return {
@@ -2895,29 +2866,41 @@ async function zipSinkPicker(name) {
     note: 'Streaming straight to the file you picked — limited only by free disk space.',
     write: b => w.write(b),
     close: () => w.close(),
-    // abort() discards everything written, so a stopped zip leaves no half file.
-    abort: () => w.abort().catch(() => {}),
+    /* Two separate things to undo: abort() discards the buffered writes, and
+       remove() takes away the entry the picker made. Doing only the first is
+       what left the empty container behind. */
+    abort: async () => {
+      try { await w.abort(); } catch {}
+      if (!ours) return;
+      // FileSystemHandle.remove() is Chromium 110+. Nothing else can unlink a
+      // file chosen through the picker, so older builds keep the placeholder.
+      try { if (handle.remove) await handle.remove(); } catch {}
+    },
   };
 }
 
 async function zipSinkOPFS(name, total) {
   if (!navigator.storage || !navigator.storage.getDirectory) return null;
   let root, handle, w;
+  /* Defined before the first create so every way out of the block below can
+     use it. getFileHandle({create:true}) makes the file immediately, so each
+     of these fall-throughs to the heap sink used to strand an empty temp
+     archive in browser storage — the same bug as the picker, just somewhere
+     the user cannot see it to delete it. */
+  const drop = () => { try { if (root) root.removeEntry(ZIP_TMP).catch(() => {}); } catch {} };
   try {
     root = await navigator.storage.getDirectory();
+    handle = await root.getFileHandle(ZIP_TMP, { create: true });
     // Safari exposes OPFS but only synchronous access handles, which need a
     // worker. No write stream here means fall through to the heap.
-    handle = await root.getFileHandle(ZIP_TMP, { create: true });
-    if (!handle.createWritable) return null;
+    if (!handle.createWritable) { drop(); return null; }
     if (navigator.storage.estimate) {
       const est = await navigator.storage.estimate();
       const free = (est.quota || 0) - (est.usage || 0);
-      if (free && total + 32 * 1024 * 1024 > free) return null;
+      if (free && total + 32 * 1024 * 1024 > free) { drop(); return null; }
     }
     w = await handle.createWritable();
-  } catch { return null; }
-
-  const drop = () => { try { root.removeEntry(ZIP_TMP).catch(() => {}); } catch {} };
+  } catch { drop(); return null; }
   return {
     kind: 'opfs',
     label: 'via browser storage',
