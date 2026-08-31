@@ -1090,7 +1090,7 @@ kbd{
       <p class="hint" id="zip-note" style="margin-top:12px"></p>
     </div>
     <div class="m-f">
-      <button class="btn btn-s" id="zip-stop" onclick="cancelZip()">Stop</button>
+      <button class="btn btn-s" id="zip-stop" onclick="cancelZip()">Cancel</button>
       <button class="btn btn-p" id="zip-done" disabled onclick="hideModal('m-zip')">Done</button>
     </div>
   </div>
@@ -2960,7 +2960,7 @@ async function* zipObjectChunks(key, ac, onBytes) {
 }
 
 /* ── The zip run ──────────────────────────────────────────────────── */
-let zipBusy = false, zipAbort = null;
+let zipBusy = false, zipAbort = null, zipCancelled = false;
 
 function zipSet({ stage, count, pct, note, ind }) {
   if (stage !== undefined) el('zip-stage').textContent = stage;
@@ -2971,6 +2971,9 @@ function zipSet({ stage, count, pct, note, ind }) {
 }
 
 function zipFinish(cls, stage, note, pct = 100) {
+  // Cancelled runs already closed the dialog and said their piece in a toast.
+  // Reopening it to show an outcome nobody is waiting for would be noise.
+  if (zipCancelled) { zipBusy = false; zipAbort = null; return; }
   el('zip-trk').classList.remove('ind');
   el('zip-bar').className = cls;              // '' | 'ok' | 'no' | 'off'
   el('zip-bar').style.width = pct + '%';
@@ -2982,12 +2985,17 @@ function zipFinish(cls, stage, note, pct = 100) {
   zipAbort = null;
 }
 
-// Lands between objects: an entry is either whole in the archive or not in it.
+/* Cancel is total, not partial: nothing half-written is ever saved and the
+   file the picker created is unlinked, so there is no result left to report and
+   no reason to keep the dialog on screen waiting for a Done press. It closes on
+   the press; the run behind it unwinds and cleans up, and a toast lands when it
+   has. zipFinish stays silent for a cancelled run so this is the only word. */
 function cancelZip() {
   if (!zipBusy || !zipAbort) return;
+  zipCancelled = true;
   zipAbort.abort();
-  zipSet({ note: 'Stopping — the partial archive will be discarded.' });
-  el('zip-stop').disabled = true;
+  hideModal('m-zip');
+  toast('Download cancelled — no archive was saved', 'inf');
 }
 
 /* Names inside the archive are relative to where you are standing, so
@@ -3036,6 +3044,7 @@ async function zipRun(picks, name) {
   zipBusy = true;
   zipAbort = new AbortController();
   el('zip-bar').className = '';
+  zipCancelled = false;
   el('zip-stop').disabled = false;
   el('zip-done').disabled = true;
   zipSet({ stage: 'Preparing…', count: '', pct: 0, note: '', ind: false });
@@ -3070,7 +3079,7 @@ async function zipRun(picks, name) {
 
     if (zipAbort.signal.aborted) {
       await sinkAbort(sink);
-      return zipFinish('off', 'Stopped', 'Nothing was written.', 0);
+      return zipFinish('off', 'Cancelled', 'Nothing was saved.', 0);
     }
 
     /* Keys ending in '/' are the zero-byte markers that hold an empty
@@ -3144,13 +3153,20 @@ async function zipRun(picks, name) {
 
     if (zipAbort.signal.aborted) {
       await sinkAbort(sink);
-      return zipFinish('off', 'Stopped',
-        `Stopped after ${done} of ${entries.length} objects. The partial archive was discarded.`,
+      return zipFinish('off', 'Cancelled',
+        `Cancelled after ${done} of ${entries.length} objects. No archive was saved.`,
         total ? (wrote / total) * 100 : 0);
     }
 
     zipSet({ stage: 'Finishing…', ind: false, pct: 100 });
     await zw.finish();
+    /* The only remaining gap: close() is what commits the picked file and what
+       fires the download on the other two sinks, so a cancel landing between
+       finish() and here would still save a complete-but-unwanted archive. */
+    if (zipAbort.signal.aborted) {
+      await sinkAbort(sink);
+      return zipFinish('off', 'Cancelled', 'Nothing was saved.', 0);
+    }
     await sink.close();
     zipFinish('ok', 'Saved',
       `${entries.length} ${entries.length === 1 ? 'object' : 'objects'} · ${fmtSize(wrote)} · ${name}`);
@@ -3158,9 +3174,9 @@ async function zipRun(picks, name) {
     await sinkAbort(sink);
     const aborted = err && (err.name === 'AbortError' || zipAbort && zipAbort.signal.aborted);
     const reached = total ? Math.min(100, (wrote / total) * 100) : 0;
-    zipFinish(aborted ? 'off' : 'no', aborted ? 'Stopped' : 'Failed',
+    zipFinish(aborted ? 'off' : 'no', aborted ? 'Cancelled' : 'Failed',
       aborted
-        ? `Stopped after ${done} of ${count} ${count === 1 ? 'object' : 'objects'}. The partial archive was discarded.`
+        ? `Cancelled after ${done} of ${count} ${count === 1 ? 'object' : 'objects'}. No archive was saved.`
         : ((err && err.message) || 'unknown error'),
       aborted ? reached : 100);
   }
