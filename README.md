@@ -1,6 +1,6 @@
 # S3Feather
 
-An S3 browser that runs entirely in your browser. No server, no install, no build step - one HTML file, open it and start browsing. Works on desktop and mobile, on any platform.
+An S3 browser that runs entirely in your web browser. No server, no install, no build step - one HTML file, open it and start browsing. Works on desktop and mobile, on any platform.
 
 Live: [try it now!](https://wespeakenglish.github.io/S3Feather/) 
 
