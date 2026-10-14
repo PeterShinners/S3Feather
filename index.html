@@ -1058,10 +1058,16 @@ kbd{
         <label class="fl" for="share-exp">Link expires in</label>
         <select class="in" id="share-exp" onchange="genPresign()">
           <option value="300">5 minutes</option>
-          <option value="3600" selected>1 hour</option>
+          <option value="3600">1 hour</option>
           <option value="86400">24 hours</option>
           <option value="604800">7 days</option>
+          <option value="2592000" selected>30 days</option>
+          <option value="7776000">90 days</option>
+          <option value="15552000">180 days</option>
+          <option value="31536000">1 year</option>
+          <option value="never">Never</option>
         </select>
+        <div class="hint" id="share-exp-hint" hidden></div>
       </div>
       <div class="fld">
         <label class="fl" for="share-url">Presigned URL</label>
@@ -2666,9 +2672,36 @@ function showShare(item) {
   showModal('m-share');
   genPresign();
 }
+/* SigV4 presigned URLs are capped at 7 days by the protocol itself (the SDK
+   throws and S3 rejects anything longer). Longer links therefore fall back
+   to legacy SigV2 query signing, which takes an absolute expiry timestamp.
+   "Never" is the furthest date that is still safe as a 32-bit epoch value. */
+const SIGV4_MAX = 604800;
+const NEVER_UNTIL = 2147483647;   // 2^31 - 1 = 19 Jan 2038 03:14:07 UTC
 function genPresign() {
   if (!S3 || !shareKey) return;
-  el('share-url').value = signed(shareKey, parseInt(el('share-exp').value, 10));
+  const v = el('share-exp').value;
+  const secs = v === 'never'
+    ? Math.floor(NEVER_UNTIL - Date.now() / 1000)
+    : parseInt(v, 10);
+  const hint = el('share-exp-hint');
+  hint.hidden = secs <= SIGV4_MAX;
+  hint.innerHTML = '<b>Longer than 7 days uses legacy SigV2 signing.</b> ' +
+    'AWS S3 rejects SigV2 in newer regions and for buckets created after June 2020; ' +
+    'MinIO, Ceph and most S3-compatible stores accept it.' +
+    (v === 'never' ? ' "Never" is valid until 19 Jan 2038.' : '');
+  try {
+    if (secs <= SIGV4_MAX) {
+      el('share-url').value = signed(shareKey, secs);
+    } else {
+      const v2 = new AWS.S3({ signatureVersion: 's3' });
+      el('share-url').value = v2.getSignedUrl('getObject',
+        { Bucket: bucket, Key: shareKey, Expires: secs });
+    }
+  } catch (e) {
+    el('share-url').value = '';
+    toast(`Could not sign link: ${e.message || e}`, 'err');
+  }
 }
 function copyPresign() {
   const url = el('share-url').value;
