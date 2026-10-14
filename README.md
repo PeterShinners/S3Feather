@@ -18,7 +18,7 @@ Live: [try it now!](https://wespeakenglish.github.io/S3Feather/)
 - **File operations** — upload with per-file progress, download, delete one or many with progress you can stop
 - **Zip downloads** — selecting more than one object, or a prefix, downloads a single archive; there is no queue of separate downloads to babysit
 - **List and grid views** — grid shows real image thumbnails
-- **Presigned share links** — temporary download URLs, 5 minutes to 7 days
+- **Presigned share links** — download URLs from 5 minutes to 1 year, or *Never*; 7 days by default
 - **Drag and drop** — drop files anywhere on the window to upload into the current prefix
 - **Flatten** — one keypress lists every key beneath the current prefix, nested folders included, so you can search a whole subtree instead of walking it
 - **Sort and filter** — by name, size or date; live filter across every page loaded for the prefix, and across every level when the listing is flattened
@@ -222,7 +222,7 @@ Each row shows the name on top and the endpoint host (or the region) underneath.
 | Backblaze B2 | `https://s3.<region>.backblazeb2.com` |
 | Storj | `https://gateway.storjshare.io` |
 
-Enter the URL in the **Endpoint** field. Path-style requests and Signature V4 are used automatically.
+Enter the URL in the **Endpoint** field. Path-style requests and Signature V4 are used automatically. The one exception is a share link longer than 7 days, which is signed with Signature V2 — see *Share links longer than 7 days* below.
 
 > **Mixed content:** if you serve S3Exp over HTTPS, the endpoint must be HTTPS too. A browser blocks `http://` requests from an `https://` page, so a plain-HTTP MinIO host only works when S3Exp itself is on `http://localhost`.
 
@@ -243,7 +243,12 @@ Enter the URL in the **Endpoint** field. Path-style requests and Signature V4 ar
 - **Cancelling an upload** stops the queue; it does not undo transfers that already finished. Files uploaded before you clicked **Cancel** stay in the bucket, a file interrupted mid-transfer is not written, and the dialog reports how many of the batch made it.
 - **More than one object always means an archive.** A multi-object selection, or any prefix, goes through the zip path; only a single file is fetched directly. The browser therefore never sees a burst of downloads to prompt about.
 - **A single file saves under its last path segment.** A key can carry a path — in a flattened listing every name does — and a slash is not legal in a download filename, so `sub/deep/scan.jpg` saves as `scan.jpg`. Inside a zip the full relative path is kept.
-- **Link lifetimes:** download links are signed for 60 seconds, grid thumbnails for 15 minutes, and share links for whatever you pick in the dialog.
+- **Link lifetimes:** download links are signed for 60 seconds, grid thumbnails for 15 minutes, and share links for whatever you pick in the dialog — 5 minutes, 1 hour, 24 hours, **7 days (default)**, 30 days, 90 days, 180 days, 1 year, or Never.
+- **Share links longer than 7 days use Signature V2.** Signature V4 caps a presigned URL at 7 days by design — the SDK refuses to sign anything longer and S3 rejects it — so 7 days and shorter are signed with V4, and the longer options fall back to legacy V2, which takes an absolute expiry date. The dialog shows a note whenever a V2 option is picked. Whether the link works depends on the service:
+  - **AWS S3** rejects V2 in regions launched after 2014 and for buckets created after June 2020, so on a modern AWS bucket the long options will most likely fail. For long-lived access there, use a public object or CloudFront signed URLs instead.
+  - **MinIO, Ceph** and most S3-compatible stores accept V2. **Storj**'s hosted gateway appears to accept it too, but Storj does not document it — open one long link in a private window before relying on it. Storj's own Linksharing Service is an alternative for links that never expire.
+- **"Never" means 19 Jan 2038, 03:14:07 UTC.** That is the largest Unix timestamp that fits in a signed 32-bit integer; a later V2 expiry could overflow on servers that parse it that way and be rejected as already expired.
+- **Every share link dies with its key.** Whatever expiry was chosen, a link stops working when the access key that signed it is rotated or disabled — and if the connection uses temporary (STS) credentials, when those expire.
 
 ---
 
@@ -252,6 +257,7 @@ Enter the URL in the **Endpoint** field. Path-style requests and Signature V4 ar
 - Credentials are held **only in `sessionStorage`**, never in `localStorage`, cookies, or on disk.
 - `sessionStorage` is scoped to the tab. **Closing the tab clears it; reloading the page does not** — the connections come back after a refresh, which is deliberate. Use **Clear session** to wipe them immediately.
 - Presigned URLs are generated locally by the AWS SDK and pass through no third-party server.
+- A presigned URL is a bearer token: anyone holding it can download the object, and it cannot be revoked on its own short of rotating the signing key. Prefer the shortest expiry that does the job, and treat 1-year and *Never* links as effectively public.
 - Scope credentials to a single bucket with the four actions listed above, and rotate them.
 
 Encryption at rest is not the same as safety while running:
